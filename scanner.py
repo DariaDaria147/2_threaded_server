@@ -1,106 +1,126 @@
 # ИСАДИЧЕВА ДАРЬЯ АЛЕКСЕЕВНА, ДПИ22-1
 
-# Код сервера
-
 import socket  # сокеты
 import threading  # для многопоточности
-import errno  # символические коды ошибок
+from tqdm import tqdm  # для progress bar
 
-# счётчик клиентов
-client_counter = 0
-# объект блокировки для синхронизации доступа к стандартному выводу
-print_lock = threading.Lock()
-# создаем объект события для остановки сервера
-# я решила установить для остановки сервера KeyboardInterrupt чтобы сервер
-# не отключался после отключение последнего клиента (чтобы клиенты еще могли подключаться)
-shutdown_event = threading.Event()
-# список активных соединений
-active_connections = []
+# проверяем хост/IP-адрес
+# если пользователь вводит хост - идёт проверка и возвращается IP-адрес
+# если пользователь вводит IP - функция вернет этот же IP-адрес без изменений
+# в случае некорректного имени хоста/IP-адреса - False
 
-# работа с клиентом
-def client_work(conn, addr):
-    global active_connections
-    # счётчик клиентов
-    global client_counter
-    # подключение клиентов
-    with print_lock:
-        client_counter += 1
-        client_number = client_counter
-        print(f"Клиент {client_number} {addr} подключился к серверу.")
-    # добавляем соединение в список активных соединений
-    active_connections.append(conn)
-    # принимаем сообщение от клиента порционно
-    while not shutdown_event.is_set():
-        try:
-            data = conn.recv(1024)
-            if not data:
-                break
-            with print_lock:
-                print(f"Сервер получил данные от клиента {client_number}: {data.decode()}")
-            # немного видоизменим возвращаемые данные
-            changed_data = f"{data.decode().replace(' ', '...')}..."
-            # отправляем данные клиенту
-            conn.send(changed_data.encode())
-            with print_lock:
-                print(f"Полученые данные были видоизменены и отправлены обратно клиенту {client_number}.")
-        except OSError as e:
-            if e.errno == errno.EBADF:  # проверяем, что ошибка связана с некорректным файловым дескриптором
-                break  # завершаем цикл, если файловый дескриптор некорректен
-            else:
-                raise  # передаем другие ошибки дальше
-
-    # закрываем соединение
-    with print_lock:
-        print(f"Отключение клиента {client_number} от сервера...")
-        conn.close()
-        print(f"Клиент {client_number} отключился от сервера.")
-    # удаляем соединение из списка активных соединений
-    active_connections.remove(conn)
-
-# создание сервера
-def my_server():
-    # устанавливаем хост (пустая строка) и порт (0-65535)
-    host = ''
-    port = 56362
-
-    # создаём сокет
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        # привязка сокета к хосту и порту
-        server_socket.bind((host, port))
-        # прослушивание
-        # 5 - максимальное количество ожидающих подключений в очереди
-        # сли в данный момент уже принято максимальное количество подключений,
-        # новые запросы будут помещены в очередь ожидания и обработаны после
-        # того как одно из подключений будет обработано и закрыто
-        server_socket.listen(5)
-        with print_lock:
-            print(f"Сервер запущен на порту {port}. Для остановки сервера используйте KeyboardInterrupt.")  # служебное сообщение 1
-            print(f"Прослушивание порта {port}...")
-
-        # принимаем подключения вплоть до KeyboardInterrupt
-        while not shutdown_event.is_set():
-            # принимаем подключение клиента
-            conn, addr = server_socket.accept()
-            # создаём новый поток для обработки клиента
-            thread_name = f"поток_{client_counter + 1} "
-            client_thread = threading.Thread(target=client_work, name=thread_name, args=(conn, addr))
-            # запускаем поток
-            client_thread.start()
-            with print_lock:
-                print(f"Создан новый поток для обработки клиента {addr}. Название потока: {thread_name}")
-
-
-if __name__ == "__main__":
+def is_valid_host(hostname):
     try:
-        my_server()
+        socket.gethostbyname(hostname)
+        return True
+    except socket.error:
+        return False
+
+# функция для соединения с портами
+def port_connect(ip, port, open_ports):
+    try:
+        # создаём сокет
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # таймаут на подключение к порту (если порт недоступен/не отвечает)
+        s.settimeout(1)
+        try:
+            # подключение к порту
+            connect = s.connect_ex((ip, port))
+            # если подключение успешно - добавляем порт в список открытых портов
+            # и выводим сообщение
+            if connect == 0:
+                open_ports.append(port)
+        # закрываем сокет
+        finally:
+            s.close()
+    except:
+        pass
+
+# функция для сканирования портов по порядку
+def sequential_scan(host):
+    # список открытых портов
+    open_ports = []
+    try:
+        ip = socket.gethostbyname(host)
+        print("\n=== Последовательная обработка ===")
+        print(f"Сканируем по порядку порты {ip}...")
+        # сканируем порты 0 - 65535
+        with tqdm(total=65536, desc="Сканирование") as pbar:
+            for port in range(0, 65536):
+                port_connect(ip, port, open_ports)
+                pbar.update(1)  # Обновляем прогресс-бар
+    # обрабатываем ошибки
+    except socket.error as e:
+        print(f"Ошибка: {e}")
+    # останавливаем сканер вручную
     except KeyboardInterrupt:
-        shutdown_event.set()
-        # закрываем все активные соединения
-        for conn in active_connections:
-            conn.close()
-        with print_lock:
-            print("Все активные соединения закрыты.")
-        # сокет закрывается автоматически при выходе из блока with
-        with print_lock:
-            print("Остановка сервера...")
-            print("Сервер остановлен.")
+        print("Сканирование портов было прервано.")
+    if not open_ports:
+        print("Свободные порты не найдены.")
+    # возвращаем список открытых портов
+    return sorted(open_ports)
+
+# функция для параллельного сканирования портов
+def parallel_scan(host):
+    # список открытых портов
+    open_ports = []
+    try:
+        ip = socket.gethostbyname(host)
+        print("\n=== Параллельная обработка ===")
+        print(f"Сканируем параллельно порты {ip}...")
+        # список всех потоков
+        threads = []
+        # для каждого порта создаём и запускаем поток, добавляем их в список потоков
+        with tqdm(total=65536, desc="Сканирование") as pbar:
+            for port in range(0, 65536):
+                thread = threading.Thread(target=lambda: [port_connect(ip, port, open_ports), pbar.update(1)])
+                threads.append(thread)
+                thread.start()
+            for thread in threads:
+                thread.join()
+        # завершение потоков
+        for thread in threads:
+            thread.join()
+    # обрабатываем ошибки
+    except socket.error as e:
+        print(f"Ошибка: {e}")
+    # останавливаем сканирование вручную
+    except KeyboardInterrupt:
+        print("Сканироание портов было прервано.")
+    if not open_ports:
+        print("Свободные порты не найдены.")
+    # возвращаем список открытых портов
+    return sorted(open_ports)
+
+# предлагаем пользователю ввести имя хоста/IP-адрес
+if __name__ == "__main__":
+    while True:
+        host = input("Введите имя хоста/IP-адрес: ")
+        if is_valid_host(host):
+            break
+        else:
+            print("Некорректное имя хоста/IP-адрес. Попробуйте снова.")
+
+    # предлагаем метод сканирования портов
+    print("\nВыберите метод сканирования:")
+    print("1. Последовательное сканирование")
+    print("2. Параллельное сканирование")
+
+    # сканирование в зависимости от выбранного метода и вывод списка портов
+    while True:
+        method = input("Введите номер метода сканирования (1 или 2): ")
+        if method == "1":
+            open_ports = sequential_scan(host)
+            break
+        elif method == "2":
+            open_ports = parallel_scan(host)
+            break
+        else:
+            print("Некорректный выбор. Введите 1 или 2.")
+    if open_ports:
+        print("\nОткрытые порты:")
+        for port in open_ports:
+            print(f" - Порт {port} открыт...")
+        print("\nОткрытые порты:", sorted(open_ports))
+    else:
+        print("Свободные порты не найдены.")
