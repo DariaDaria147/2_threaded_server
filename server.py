@@ -1,175 +1,106 @@
-import socket  # Модуль для работы с сокетами
-import threading  # Модуль для работы с потоками
-import sys  # Модуль для доступа к некоторым функциям и переменным интерпретатора Python
-import signal  # Модуль для обработки сигналов (например, Ctrl+C)
-import logging  # Модуль для логирования
-import os  # Модуль для работы с файловой системой
+# ИСАДИЧЕВА ДАРЬЯ АЛЕКСЕЕВНА, ДПИ22-1
 
-# Файл для хранения идентификации
-IDENTIFICATION_FILE = 'identification.txt'
+# Код сервера
 
-# Настройка логирования
-logging.basicConfig(filename='server.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+import socket  # сокеты
+import threading  # для многопоточности
+import errno  # символические коды ошибок
 
-# Глобальные флаги
-server_running = True  # Флаг состояния сервера (работает или завершен)
-server_paused = False  # Флаг состояния прослушивания (активно или на паузе)
+# счётчик клиентов
+client_counter = 0
+# объект блокировки для синхронизации доступа к стандартному выводу
+print_lock = threading.Lock()
+# создаем объект события для остановки сервера
+# я решила установить для остановки сервера KeyboardInterrupt чтобы сервер
+# не отключался после отключение последнего клиента (чтобы клиенты еще могли подключаться)
+shutdown_event = threading.Event()
+# список активных соединений
+active_connections = []
 
-# Список для хранения активных клиентских потоков
-client_threads = []
-
-def client_handler(conn, addr):
-    """
-    Функция для обработки взаимодействия с клиентом в отдельном потоке.
-    """
-    logging.info(f"Подключен клиент {addr}")
-    # Записываем информацию об идентификации клиента в файл
-    with open(IDENTIFICATION_FILE, 'a') as f:
-        f.write(f"Клиент {addr} подключился.\n")
-
-    try:
-        while True:
-            # Бесконечный цикл для приема данных от клиента
-            data = conn.recv(1024)
-            # Получаем данные размером до 1024 байт
-            if not data:
-                # Если данных нет, значит клиент отключился
-                break
-            msg = data.decode()
-            # Декодируем байтовые данные в строку
-            logging.info(f"Сообщение от {addr}: {msg}")
-            conn.send(data)
-            # Отправляем данные обратно клиенту (эхо)
-    except ConnectionResetError:
-        # Обработка ситуации, когда клиент неожиданно отключился
-        logging.warning(f"Соединение с клиентом {addr} было разорвано")
-    finally:
-        logging.info(f"Клиент {addr} отключился")
-        conn.close()
-        # Закрываем соединение с данным клиентом
-
-def server_listener(sock):
-    """
-    Функция для прослушивания входящих подключений.
-    Выполняется в отдельном потоке.
-    """
-    global server_running, server_paused
-
-    while server_running:
-        if server_paused:
-            # Если сервер на паузе, ждем перед проверкой снова
-            threading.Event().wait(1)
-            continue
-
+# работа с клиентом
+def client_work(conn, addr):
+    global active_connections
+    # счётчик клиентов
+    global client_counter
+    # подключение клиентов
+    with print_lock:
+        client_counter += 1
+        client_number = client_counter
+        print(f"Клиент {client_number} {addr} подключился к серверу.")
+    # добавляем соединение в список активных соединений
+    active_connections.append(conn)
+    # принимаем сообщение от клиента порционно
+    while not shutdown_event.is_set():
         try:
-            conn, addr = sock.accept()
-            # Принимаем новое входящее подключение
-            client_thread = threading.Thread(target=client_handler, args=(conn, addr))
-            # Создаем новый поток для обслуживания клиента
-            client_thread.start()
-            # Запускаем поток
-            client_threads.append(client_thread)
-            # Добавляем поток в список активных потоков
-        except socket.timeout:
-            # Если время ожидания соединения истекло, проверяем состояние сервера
-            continue
-        except OSError:
-            # Если сокет был закрыт, выходим из цикла
-            break
-
-def main():
-    global server_running, server_paused
-    sock = socket.socket()
-    # Создаем TCP-сокет
-    # Устанавливаем опцию SO_REUSEADDR, чтобы переиспользовать адрес и порт
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-    sock.bind(('', 9090))
-    # Связываем сокет с адресом и портом.
-    sock.listen()
-    # Переводим сокет в режим прослушивания входящих подключений
-    sock.settimeout(1)  # Устанавливаем таймаут для accept(), чтобы проверять флаги
-
-    print("Сервер запущен и ожидает подключений...")
-    logging.info("Сервер запущен и ожидает подключений...")
-
-    # Запускаем поток для прослушивания входящих соединений
-    listener_thread = threading.Thread(target=server_listener, args=(sock,))
-    listener_thread.start()
-
-    # Основной поток программы для принятия команд от пользователя
-    try:
-        while True:
-            command = input("Введите команду (shutdown, pause, resume, show logs, clear logs, clear id): ").strip().lower()
-
-            if command == 'shutdown':
-                # Завершение работы сервера
-                print("Завершение работы сервера...")
-                logging.info("Сервер завершает работу по команде shutdown.")
-                server_running = False
-                server_paused = False  # На случай, если сервер был на паузе
-                sock.close()  # Закрываем сокет, чтобы выйти из accept()
+            data = conn.recv(1024)
+            if not data:
                 break
-            elif command == 'pause':
-                if not server_paused:
-                    server_paused = True
-                    print("Сервер поставлен на паузу. Новые подключения не принимаются.")
-                    logging.info("Сервер поставлен на паузу по команде pause.")
-                else:
-                    print("Сервер уже находится на паузе.")
-            elif command == 'resume':
-                if server_paused:
-                    server_paused = False
-                    print("Сервер возобновил прием подключений.")
-                    logging.info("Сервер возобновил работу по команде resume.")
-                else:
-                    print("Сервер и так работает.")
-            elif command == 'show logs':
-                # Показываем содержимое файла логов
-                if os.path.exists('server.log'):
-                    with open('server.log', 'r') as log_file:
-                        print("\n=== Содержимое логов ===")
-                        print(log_file.read())
-                        print("=== Конец логов ===\n")
-                else:
-                    print("Лог-файл отсутствует.")
-            elif command == 'clear logs':
-                # Очищаем файл логов
-                if os.path.exists('server.log'):
-                    open('server.log', 'w').close()
-                    print("Логи очищены.")
-                    logging.info("Логи были очищены по команде clear logs.")
-                else:
-                    print("Лог-файл отсутствует.")
-            elif command == 'clear id':
-                # Очищаем файл идентификации
-                if os.path.exists(IDENTIFICATION_FILE):
-                    open(IDENTIFICATION_FILE, 'w').close()
-                    print("Файл идентификации очищен.")
-                    logging.info("Файл идентификации был очищен по команде clear id.")
-                else:
-                    print("Файл идентификации отсутствует.")
+            with print_lock:
+                print(f"Сервер получил данные от клиента {client_number}: {data.decode()}")
+            # немного видоизменим возвращаемые данные
+            changed_data = f"{data.decode().replace(' ', '...')}..."
+            # отправляем данные клиенту
+            conn.send(changed_data.encode())
+            with print_lock:
+                print(f"Полученые данные были видоизменены и отправлены обратно клиенту {client_number}.")
+        except OSError as e:
+            if e.errno == errno.EBADF:  # проверяем, что ошибка связана с некорректным файловым дескриптором
+                break  # завершаем цикл, если файловый дескриптор некорректен
             else:
-                print("Неизвестная команда. Доступные команды: shutdown, pause, resume, show logs, clear logs, clear id.")
+                raise  # передаем другие ошибки дальше
 
-    except KeyboardInterrupt:
-        # Обработка сигнала Ctrl+C
-        print("\nЗавершение работы сервера...")
-        logging.info("Сервер завершает работу по сигналу Ctrl+C.")
-        server_running = False
-        server_paused = False
-        sock.close()
+    # закрываем соединение
+    with print_lock:
+        print(f"Отключение клиента {client_number} от сервера...")
+        conn.close()
+        print(f"Клиент {client_number} отключился от сервера.")
+    # удаляем соединение из списка активных соединений
+    active_connections.remove(conn)
 
-    # Ожидаем завершения потока прослушивания
-    listener_thread.join()
+# создание сервера
+def my_server():
+    # устанавливаем хост (пустая строка) и порт (0-65535)
+    host = ''
+    port = 56362
 
-    # Ожидаем завершения всех клиентских потоков
-    for t in client_threads:
-        t.join()
+    # создаём сокет
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        # привязка сокета к хосту и порту
+        server_socket.bind((host, port))
+        # прослушивание
+        # 5 - максимальное количество ожидающих подключений в очереди
+        # сли в данный момент уже принято максимальное количество подключений,
+        # новые запросы будут помещены в очередь ожидания и обработаны после
+        # того как одно из подключений будет обработано и закрыто
+        server_socket.listen(5)
+        with print_lock:
+            print(f"Сервер запущен на порту {port}. Для остановки сервера используйте KeyboardInterrupt.")  # служебное сообщение 1
+            print(f"Прослушивание порта {port}...")
 
-    print("Сервер остановлен.")
-    logging.info("Сервер остановлен.")
+        # принимаем подключения вплоть до KeyboardInterrupt
+        while not shutdown_event.is_set():
+            # принимаем подключение клиента
+            conn, addr = server_socket.accept()
+            # создаём новый поток для обработки клиента
+            thread_name = f"поток_{client_counter + 1} "
+            client_thread = threading.Thread(target=client_work, name=thread_name, args=(conn, addr))
+            # запускаем поток
+            client_thread.start()
+            with print_lock:
+                print(f"Создан новый поток для обработки клиента {addr}. Название потока: {thread_name}")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        my_server()
+    except KeyboardInterrupt:
+        shutdown_event.set()
+        # закрываем все активные соединения
+        for conn in active_connections:
+            conn.close()
+        with print_lock:
+            print("Все активные соединения закрыты.")
+        # сокет закрывается автоматически при выходе из блока with
+        with print_lock:
+            print("Остановка сервера...")
+            print("Сервер остановлен.")
